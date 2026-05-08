@@ -244,6 +244,7 @@ impl DfuSansIo {
                 upload::ProtocolData::Dfuse(upload::DfuseProtocolData {
                     address,
                     address_set: false,
+                    abort_needed: false,
                 })
             }
         };

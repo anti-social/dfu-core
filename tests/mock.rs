@@ -408,6 +408,14 @@ impl DfuIo for MockIO {
         assert_eq!(request_type, REQUEST_TYPE);
         let request = Request::from_u8(request).expect("Unknown request");
         match (request, self.state()) {
+            (Request::DFU_ABORT, State::DfuDnloadIdle | State::DfuUploadIdle) => {
+                self.update_state(State::DfuIdle);
+                Ok(0)
+            }
+            (Request::DFU_CLRSTATUS, State::DfuError) => {
+                self.update_state(State::DfuIdle);
+                Ok(0)
+            }
             (Request::DFU_DNLOAD, State::DfuIdle | State::DfuDnloadIdle) => {
                 if buffer.is_empty() {
                     assert_eq!(self.state(), State::DfuDnloadIdle);

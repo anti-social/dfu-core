@@ -293,6 +293,11 @@ where
                     control.execute_async(&self.io).await?;
                     wait_for_state(wait, &self.io, &mut self.buffer).await?
                 }
+                upload::Step::Abort(cmd) => {
+                    let (next, control) = cmd.abort();
+                    control.execute_async(&self.io).await?;
+                    next
+                }
                 upload::Step::UploadChunk(cmd) => {
                     let (recv, mut control) = cmd.upload(&mut self.buffer);
                     let n = control.execute_async(&self.io).await?;

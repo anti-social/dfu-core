@@ -5,6 +5,7 @@ use pretty_hex::PrettyHex;
 const REQUEST_TYPE: u8 = 0b00100001;
 const DFU_GETSTATUS: u8 = 3;
 const DFU_CLRSTATUS: u8 = 4;
+const DFU_ABORT: u8 = 6;
 
 /// Get status message.
 pub struct GetStatusMessage {
@@ -95,14 +96,19 @@ impl<T> ChainedCommand for ClearStatus<T> {
         }: Self::Arg,
     ) -> (T, Option<UsbWriteControl<[u8; 0]>>) {
         let next = self.chained_command;
-        if state == State::DfuError {
-            log::trace!("Device is in error state, clearing status...");
-            let control = UsbWriteControl::new(REQUEST_TYPE, DFU_CLRSTATUS, 0, []);
-
-            (next, Some(control))
-        } else {
-            log::trace!("Device is not in error state, skip clearing status");
-            (next, None)
+        match state {
+            State::DfuError => {
+                log::trace!("Device is in error state, clearing status...");
+                (next, Some(UsbWriteControl::new(REQUEST_TYPE, DFU_CLRSTATUS, 0, [])))
+            }
+            State::DfuDnloadIdle | State::DfuUploadIdle => {
+                log::trace!("Device is in {:?} state, aborting...", state);
+                (next, Some(UsbWriteControl::new(REQUEST_TYPE, DFU_ABORT, 0, [])))
+            }
+            _ => {
+                log::trace!("Device is not in error or active state, skip clearing status");
+                (next, None)
+            }
         }
     }
 }

@@ -233,6 +233,11 @@ where
                     control.execute(&self.io)?;
                     wait_for_state(wait, &self.io, &mut self.buffer)?
                 }
+                upload::Step::Abort(cmd) => {
+                    let (next, control) = cmd.abort();
+                    control.execute(&self.io)?;
+                    next
+                }
                 upload::Step::UploadChunk(cmd) => {
                     let (recv, mut control) = cmd.upload(&mut self.buffer);
                     let n = control.execute(&self.io)?;

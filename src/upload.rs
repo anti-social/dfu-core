@@ -5,6 +5,7 @@ use super::*;
 const REQUEST_TYPE: u8 = 0b00100001;
 const DFU_UPLOAD: u8 = 2;
 const DFU_DNLOAD: u8 = 1;
+const DFU_ABORT: u8 = 6;
 
 /// Starting point to upload firmware from a device.
 #[must_use]
@@ -18,6 +19,7 @@ pub struct Start<'dfu> {
 pub(crate) struct DfuseProtocolData {
     pub address: u32,
     pub address_set: bool,
+    pub abort_needed: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -89,6 +91,15 @@ impl<'dfu> UploadLoop<'dfu> {
                     block_num: self.block_num,
                 })
             }
+            ProtocolData::Dfuse(d) if d.abort_needed => {
+                log::trace!("Upload loop: abort after set address");
+                Step::Abort(Abort {
+                    descriptor: self.descriptor,
+                    remaining: self.remaining,
+                    protocol: d,
+                    block_num: self.block_num,
+                })
+            }
             _ => {
                 log::trace!("Upload loop: upload chunk");
                 Step::UploadChunk(UploadChunk {
@@ -107,6 +118,7 @@ impl<'dfu> UploadLoop<'dfu> {
 pub enum Step<'dfu> {
     Break,
     SetAddress(SetAddress<'dfu>),
+    Abort(Abort<'dfu>),
     UploadChunk(UploadChunk<'dfu>),
 }
 
@@ -129,6 +141,7 @@ impl<'dfu> SetAddress<'dfu> {
     ) {
         let next_protocol = ProtocolData::Dfuse(DfuseProtocolData {
             address_set: true,
+            abort_needed: true,
             ..self.protocol
         });
         let next = get_status::WaitState::new(
@@ -148,6 +161,34 @@ impl<'dfu> SetAddress<'dfu> {
             0,
             <[u8; 5]>::from(SetAddressCommand(self.protocol.address)),
         );
+        (next, control)
+    }
+}
+
+/// Abort to return device to DfuIdle after set-address (DfuSe only).
+#[must_use]
+pub struct Abort<'dfu> {
+    descriptor: &'dfu FunctionalDescriptor,
+    remaining: u32,
+    protocol: DfuseProtocolData,
+    block_num: u16,
+}
+
+impl<'dfu> Abort<'dfu> {
+    /// Issue DFU_ABORT to bring the device back to DfuIdle before uploading.
+    pub fn abort(self) -> (UploadLoop<'dfu>, UsbWriteControl<[u8; 0]>) {
+        let next_protocol = ProtocolData::Dfuse(DfuseProtocolData {
+            abort_needed: false,
+            ..self.protocol
+        });
+        let next = UploadLoop {
+            descriptor: self.descriptor,
+            remaining: self.remaining,
+            protocol: next_protocol,
+            block_num: self.block_num,
+            eof: false,
+        };
+        let control = UsbWriteControl::new(REQUEST_TYPE, DFU_ABORT, 0, []);
         (next, control)
     }
 }
