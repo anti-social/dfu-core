@@ -16,6 +16,8 @@ pub mod asynchronous;
 pub mod detach;
 /// Commands to download a firmware into the device.
 pub mod download;
+/// Commands to upload firmware from the device.
+pub mod upload;
 /// Functional descriptor.
 pub mod functional_descriptor;
 /// Commands to get the status of the device.
@@ -208,6 +210,51 @@ impl DfuSansIo {
                         descriptor: &self.descriptor,
                         protocol,
                         end_pos,
+                    },
+                },
+            },
+        })
+    }
+
+    /// Create a state machine to upload firmware from the device.
+    ///
+    /// For standard DFU, pass `u32::MAX` for `length` to read until the device signals
+    /// end-of-upload (short packet). For DfuSe, pass the exact number of bytes to read.
+    pub fn upload<'a, Layout>(
+        &'a self,
+        protocol: &'a DfuProtocol<Layout>,
+        length: u32,
+    ) -> Result<
+        get_status::GetStatus<
+            get_status::ClearStatus<get_status::GetStatus<upload::Start<'a>>>,
+        >,
+        Error,
+    >
+    where
+        Layout: AsRef<memory_layout::mem>,
+    {
+        if !self.descriptor.can_upload {
+            return Err(Error::OutOfCapabilities);
+        }
+
+        let protocol_data = match protocol {
+            DfuProtocol::Dfu => upload::ProtocolData::Dfu,
+            DfuProtocol::Dfuse { address, .. } => {
+                let address = self.override_address.unwrap_or(*address);
+                upload::ProtocolData::Dfuse(upload::DfuseProtocolData {
+                    address,
+                    address_set: false,
+                })
+            }
+        };
+
+        Ok(get_status::GetStatus {
+            chained_command: get_status::ClearStatus {
+                chained_command: get_status::GetStatus {
+                    chained_command: upload::Start {
+                        descriptor: &self.descriptor,
+                        remaining: length,
+                        protocol: protocol_data,
                     },
                 },
             },

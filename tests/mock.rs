@@ -36,6 +36,8 @@ pub struct MockIOBuilder {
     // STM dfu extensions (dfuse)
     dfuse: bool,
     address: Option<u32>,
+    can_upload: bool,
+    upload_data: Option<Vec<u8>>,
 }
 
 impl MockIOBuilder {
@@ -59,6 +61,16 @@ impl MockIOBuilder {
         self
     }
 
+    pub fn can_upload(mut self, can_upload: bool) -> Self {
+        self.can_upload = can_upload;
+        self
+    }
+
+    pub fn upload_data(mut self, data: Vec<u8>) -> Self {
+        self.upload_data = Some(data);
+        self
+    }
+
     pub fn build(self) -> MockIO {
         let (dfu_version, protocol) = if !self.dfuse {
             ((0x1, 0x10), DfuProtocol::Dfu)
@@ -75,7 +87,7 @@ impl MockIOBuilder {
 
         let functional_descriptor = FunctionalDescriptor {
             can_download: true,
-            can_upload: false,
+            can_upload: self.can_upload,
             manifestation_tolerant: self.manifestation_tolerant,
             will_detach: self.will_detach,
             detach_timeout: 8,
@@ -83,7 +95,7 @@ impl MockIOBuilder {
             dfu_version,
         };
 
-        let data = MockIOData::new();
+        let data = MockIOData::new(self.upload_data.unwrap_or_default());
         let address = self.address;
 
         MockIO {
@@ -105,13 +117,15 @@ struct MockIOInner {
     busy: u16,
     was_reset: bool,
     saw_incomplete_write: bool,
+    upload_data: Vec<u8>,
+    upload_offset: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct MockIOData(Arc<Mutex<MockIOInner>>);
 
 impl MockIOData {
-    pub fn new() -> Self {
+    pub fn new(upload_data: Vec<u8>) -> Self {
         Self(Arc::new(Mutex::new(MockIOInner {
             state: State::DfuIdle,
             status: Status::Ok,
@@ -121,6 +135,8 @@ impl MockIOData {
             busy: 0,
             was_reset: false,
             saw_incomplete_write: false,
+            upload_data,
+            upload_offset: 0,
         })))
     }
 
@@ -333,6 +349,25 @@ impl DfuIo for MockIO {
         assert_eq!(request_type, REQUEST_TYPE);
         let request = Request::from_u8(request).expect("Unknown request");
         match (request, self.state()) {
+            (
+                Request::DFU_UPLOAD,
+                State::DfuIdle | State::DfuUploadIdle | State::DfuDnloadIdle,
+            ) => {
+                let transfer_size = self.functional_descriptor.transfer_size as usize;
+                let mut inner = self.inner();
+                let offset = inner.upload_offset;
+                let available = inner.upload_data.len() - offset;
+                let to_send = available.min(buffer.len());
+                buffer[..to_send].copy_from_slice(&inner.upload_data[offset..offset + to_send]);
+                inner.upload_offset += to_send;
+                let is_last = to_send < transfer_size;
+                inner.state = if is_last {
+                    State::DfuIdle
+                } else {
+                    State::DfuUploadIdle
+                };
+                Ok(to_send)
+            }
             (Request::DFU_GETSTATUS, State::DfuDnloadSync) => {
                 if self.still_busy() {
                     self.status_request(buffer, State::DfuDnbusy)

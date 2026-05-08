@@ -45,3 +45,7 @@ path = "tests/download.rs"
 name = "download_async"
 path = "tests/download_async.rs"
 required-features = [ "async"]
+
+[[test]]
+name = "upload"
+path = "tests/upload.rs"

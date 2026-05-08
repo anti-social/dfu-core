@@ -41,6 +41,28 @@ impl<R: std::io::Read> Buffer<R> {
     }
 }
 
+fn wait_for_state<T, IO, E>(
+    mut cmd: get_status::WaitState<T>,
+    io: &IO,
+    buffer: &mut [u8],
+) -> Result<T, E>
+where
+    IO: DfuIo<Read = usize, Error = E>,
+    E: From<Error>,
+{
+    loop {
+        match cmd.next() {
+            get_status::Step::Break(result) => return Ok(result),
+            get_status::Step::Wait(gs, poll_timeout) => {
+                std::thread::sleep(std::time::Duration::from_millis(poll_timeout));
+                let (recv, mut control) = gs.get_status(buffer);
+                let n = control.execute(io)?;
+                cmd = recv.chain(&buffer[..n])??;
+            }
+        }
+    }
+}
+
 /// Generic synchronous implementation of DFU.
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub struct DfuSync<IO, E>
@@ -126,23 +148,6 @@ where
             return Ok(Some(self));
         }
 
-        macro_rules! wait_status {
-            ($cmd:expr) => {{
-                let mut cmd = $cmd;
-                loop {
-                    cmd = match cmd.next() {
-                        get_status::Step::Break(cmd) => break cmd,
-                        get_status::Step::Wait(cmd, poll_timeout) => {
-                            std::thread::sleep(std::time::Duration::from_millis(poll_timeout));
-                            let (cmd, mut control) = cmd.get_status(&mut self.buffer);
-                            let n = control.execute(&self.io)?;
-                            cmd.chain(&self.buffer[..n as usize])??
-                        }
-                    };
-                }
-            }};
-        }
-
         let cmd = self.dfu.download(self.io.protocol(), length)?;
         let (cmd, mut control) = cmd.get_status(&mut self.buffer);
         let n = control.execute(&self.io)?;
@@ -160,12 +165,12 @@ where
                 download::Step::Erase(cmd) => {
                     let (cmd, control) = cmd.erase()?;
                     control.execute(&self.io)?;
-                    wait_status!(cmd)
+                    wait_for_state(cmd, &self.io, &mut self.buffer)?
                 }
                 download::Step::SetAddress(cmd) => {
                     let (cmd, control) = cmd.set_address();
                     control.execute(&self.io)?;
-                    wait_status!(cmd)
+                    wait_for_state(cmd, &self.io, &mut self.buffer)?
                 }
                 download::Step::DownloadChunk(cmd) => {
                     let chunk = reader.fill_buf()?;
@@ -175,7 +180,7 @@ where
                     if let Some(progress) = self.progress.as_mut() {
                         progress(n);
                     }
-                    wait_status!(cmd)
+                    wait_for_state(cmd, &self.io, &mut self.buffer)?
                 }
                 download::Step::UsbReset => {
                     log::trace!("Device reset");
@@ -198,6 +203,61 @@ where
             .map_err(|_| Error::MaximumTransferSizeExceeded)?;
         reader.seek(std::io::SeekFrom::Start(0))?;
         self.download(reader, length)
+    }
+
+    /// Upload firmware from the device into a writer.
+    ///
+    /// For standard DFU, pass `u32::MAX` for `length` to read until the device signals
+    /// end-of-upload. For DfuSe, pass the exact number of bytes to read.
+    pub fn upload<W: std::io::Write>(
+        &mut self,
+        mut writer: W,
+        length: u32,
+    ) -> Result<(), IO::Error> {
+        let cmd = self.dfu.upload(self.io.protocol(), length)?;
+        let (cmd, mut control) = cmd.get_status(&mut self.buffer);
+        let n = control.execute(&self.io)?;
+        let (cmd, control) = cmd.chain(&self.buffer[..n])?;
+        if let Some(control) = control {
+            control.execute(&self.io)?;
+        }
+        let (cmd, mut control) = cmd.get_status(&mut self.buffer);
+        let n = control.execute(&self.io)?;
+        let mut upload_loop = cmd.chain(&self.buffer[..n])??;
+
+        loop {
+            upload_loop = match upload_loop.next() {
+                upload::Step::Break => break,
+                upload::Step::SetAddress(cmd) => {
+                    let (wait, control) = cmd.set_address();
+                    control.execute(&self.io)?;
+                    wait_for_state(wait, &self.io, &mut self.buffer)?
+                }
+                upload::Step::UploadChunk(cmd) => {
+                    let (recv, mut control) = cmd.upload(&mut self.buffer);
+                    let n = control.execute(&self.io)?;
+                    writer.write_all(&self.buffer[..n])?;
+                    if let Some(progress) = self.progress.as_mut() {
+                        progress(n);
+                    }
+                    recv.chain(n)?
+                }
+            };
+        }
+
+        Ok(())
+    }
+
+    /// Upload the entire firmware from the device into a writer.
+    ///
+    /// For DfuSe devices, the upload length is derived from the memory layout. For standard DFU
+    /// devices, upload continues until the device signals end-of-upload.
+    pub fn upload_all<W: std::io::Write>(&mut self, writer: W) -> Result<(), IO::Error> {
+        let length = match self.io.protocol() {
+            DfuProtocol::Dfu => u32::MAX,
+            DfuProtocol::Dfuse { memory_layout, .. } => memory_layout.as_ref().iter().sum(),
+        };
+        self.upload(writer, length)
     }
 
     /// Send a Detach request to the device
